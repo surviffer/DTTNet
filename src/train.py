@@ -24,6 +24,22 @@ pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 log = utils.get_pylogger(__name__)
 
 
+# 预训练 baseline checkpoint 中不存在、允许随机初始化的参数
+_NEW_PARAM_PREFIXES = ("mr_frontend.", "fusion_scale", "window_mid", "window_short", "window_long")
+
+
+def load_pretrained_backbone(model: LightningModule, ckpt_path: str) -> None:
+    state = torch.load(ckpt_path, map_location="cpu")
+    state = state.get("state_dict", state)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    bad_missing = [k for k in missing if not k.startswith(_NEW_PARAM_PREFIXES)]
+    if bad_missing or unexpected:
+        raise RuntimeError(
+            f"预训练权重与模型不匹配\nmissing: {bad_missing}\nunexpected: {unexpected}"
+        )
+    log.info(f"Loaded pretrained backbone from {ckpt_path}; newly initialized: {sorted(set(k.split('.')[0] for k in missing))}")
+
+
 @utils.task_wrapper
 def train(cfg: DictConfig) -> Optional[float]:
     """Contains training pipeline.
@@ -47,7 +63,7 @@ def train(cfg: DictConfig) -> Optional[float]:
             raise ModuleNotFoundError
 
     except ModuleNotFoundError:
-        print('[Error] seed should be fixed for reproducibility \n=> e.g. python run.py +seed=$SEED')
+        print('[Error] seed should be fixed for reproducibility \n=> e.g. python train.py +seed=$SEED')
         exit(-1)
 
     # Init Lightning datamodule
@@ -57,6 +73,11 @@ def train(cfg: DictConfig) -> Optional[float]:
     # Init Lightning model
     log.info(f"Instantiating model <{cfg.model._target_}>")
     model: LightningModule = hydra.utils.instantiate(cfg.model)
+    model.seed = cfg.get("seed")
+
+    # 从预训练 DTTNet（单窗 baseline）加载主干，新加的多分辨率前端保持随机初始化
+    if cfg.get("pretrained_ckpt"):
+        load_pretrained_backbone(model, cfg.pretrained_ckpt)
 
     # Init Lightning callbacks
     callbacks: List[Callback] = []

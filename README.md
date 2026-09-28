@@ -105,7 +105,7 @@ Note that you will need:
 
 - 1 TB disk space for data augmentation. 
   - Otherwise, edit ```configs/datamodule/musdb18_hq.yaml``` so that:
-    - ```aug_params=[]```. This will train the model without data augmentation.
+    - ```aug_params=[0,0]```. This will train the model without data augmentation (an empty list cannot be unpacked by the dataset).
 - 2 A40 (48GB). Or equivalently, 4 RTX 3090 (24 GB). 
   - Otherwise, edit  ```configs/experiment/vocals_dis.yaml``` so that：
     -  ```datamodule.batch_size``` is smaller

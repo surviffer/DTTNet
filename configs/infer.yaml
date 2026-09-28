@@ -12,7 +12,6 @@ defaults:
 #  run:
 #    dir: ${get_eval_log_dir:${ckpt_path}}
 
-#ckpt_path: "G:\\Experiments\\KLRef\\vocals.onnx"
 ckpt_path:
 mixture_path:
 batch_size: 4

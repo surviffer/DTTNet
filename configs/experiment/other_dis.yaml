@@ -1,15 +1,16 @@
 # @package _global_
 
 # to execute this experiment run:
-# python run.py experiment=example_simple.yaml
+# python train.py experiment=other_dis datamodule=musdb_dev14
 
 defaults:
   - multigpu_default
   - override /model: other.yaml
 
 seed: 2021
+train_steps: 200000  # 四种模式共用，看测试结果前冻结
 
-exp_name: other_g32
+exp_name: ${model.target_name}_g${model.g}_${fusion_tag:${model.mr_frontend.enabled},${model.mr_frontend.fusion_mode}}_s${seed}
 
 # the name inside project
 logger:

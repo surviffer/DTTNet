@@ -4,6 +4,7 @@ _target_: src.dp_tdf.dp_tdf_net.DPTDFNet
 target_name: 'bass'
 lr: 0.0001
 optimizer: adamW
+weight_decay: 0.01  # AdamW 权重衰减（bias/BN/static_logits/fusion_scale 不衰减）
 
 dim_f: 864
 dim_t: 256
@@ -30,6 +31,8 @@ bandsequence:
   n_heads: 2
 
 mr_frontend:
+  enabled: true  # false 即 Baseline（只用中窗 STFT）
+  fusion_mode: dynamic  # fixed | learned_static | dynamic | mid_only
+  fusion_scale_init: 0.1  # 从预训练 baseline 微调时设为 0
   num_branch_layers: 2  #每一路分支两层卷积块
   weight_hidden_dim: 128  #权重网络隐藏层128
-  align_mode: bilinear  #对齐方式bilinear

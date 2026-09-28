@@ -12,7 +12,7 @@ class DPTDFNet(AbstractModel):
     def __init__(self, num_blocks, l, g, k, bn, bias, bn_norm, bandsequence, block_type, mr_frontend=None, **kwargs):
 
         super(DPTDFNet, self).__init__(**kwargs)
-        # self.save_hyperparameters()
+        self.save_hyperparameters()
 
         self.num_blocks = num_blocks #U-Net主框架encoder和decoder共有多少个block
         self.l = l #
@@ -39,7 +39,14 @@ class DPTDFNet(AbstractModel):
             nn.ReLU(),
         )
 
-        self.use_mr_frontend = mr_frontend is not None
+        # fusion_mode: baseline | fixed | learned_static | dynamic | mid_only
+        mr_cfg = dict(mr_frontend or {})
+        enabled = mr_cfg.pop("enabled", mr_frontend is not None)
+        fusion_mode = mr_cfg.pop("fusion_mode", "dynamic")
+        fusion_scale_init = mr_cfg.pop("fusion_scale_init", 0.1)
+        mr_cfg.pop("align_mode", None)  # 旧配置项，频率对齐已改为按物理频率插值
+        self.fusion_mode = fusion_mode if enabled else "baseline"
+        self.use_mr_frontend = self.fusion_mode != "baseline"
 
         if self.use_mr_frontend:
             self.mr_frontend = MRFrontend(
@@ -47,10 +54,15 @@ class DPTDFNet(AbstractModel):
                 g=g,
                 bn_norm=bn_norm,
                 bias=bias,
-                **mr_frontend
+                dim_f=self.dim_f,
+                n_fft_mid=self.n_fft_mid,
+                n_fft_short=self.n_fft_short,
+                n_fft_long=self.n_fft_long,
+                fusion_mode=self.fusion_mode,
+                **mr_cfg
             )
-            # 残差缩放系数，第一版用可学习标量
-            self.fusion_scale = nn.Parameter(torch.tensor(0.1))
+            # 残差缩放系数，三种多分辨率模式共用；从预训练 baseline 微调时设为 0
+            self.fusion_scale = nn.Parameter(torch.tensor(float(fusion_scale_init)))
 
         f = self.dim_f  #当前频率大小，下采样f=f/2，上采样f=f*2
         c = g   #first_conv后的通道数
@@ -101,24 +113,21 @@ class DPTDFNet(AbstractModel):
 
     def forward(self, x):
         """
-            两种输入形式：
-            1. 原始 DTT：x是tensor，shape=(B, C_in, F, T)
-            2. 严格版多窗前端：x是dict，包含short/mid/long
+            输入为 multi_stft() 返回的 dict，包含 short/mid/long
+            baseline 也可以直接输入中窗 tensor，多分辨率模型不允许
         """
-        if isinstance(x, dict):
-            x_short = x["short"]
-            x_mid = x["mid"]
-            x_long = x["long"]
-            # 中窗主路：复用原始first_conv
-            f_base = self.first_conv(x_mid)
-            if self.use_mr_frontend:
-                f_fused = self.mr_frontend(x_short, f_base, x_long)
-                x = f_base + self.fusion_scale * f_fused
-            else:
-                x = f_base
+        if not isinstance(x, dict):
+            # 多分辨率模型收到单窗输入会静默丢掉前端，直接报错
+            assert not self.use_mr_frontend, "多分辨率模型必须使用 multi_stft() 的 dict 输入"
+            x = {"mid": x}
+
+        # 中窗主路：复用原始first_conv
+        f_base = self.first_conv(x["mid"])
+        if self.use_mr_frontend:
+            f_fused = self.mr_frontend(x["short"], f_base, x["long"])
+            x = f_base + self.fusion_scale * f_fused
         else:
-            # 兼容原始单窗逻辑
-            x = self.first_conv(x)
+            x = f_base
 
         x = x.transpose(-1, -2)
         ds_outputs = []
@@ -136,7 +145,16 @@ class DPTDFNet(AbstractModel):
             # print(f"us{i} in: {x.shape}")
             # print(f"ds{i} out: {ds_outputs[-i - 1].shape}")
 
-            x = x * ds_outputs[-i - 1]
+            # 跳连乘法统一在 FP32 中计算；FP16 下乘积可能超出可表示范围，
+            # 所有模式都做同样的 clamp 后再转回 FP16。BF16 不需要 clamp。
+            skip = ds_outputs[-i - 1]
+            out_dtype = skip.dtype
+            with torch.autocast(device_type=x.device.type, enabled=False):
+                x = x.float() * skip.float()
+                if out_dtype == torch.float16:
+                    fp16_max = torch.finfo(torch.float16).max
+                    x = x.clamp(min=-fp16_max, max=fp16_max)
+                x = x.to(out_dtype)
             x = self.decoding_blocks[i](x)
 
         x = x.transpose(-1, -2)
@@ -144,3 +162,12 @@ class DPTDFNet(AbstractModel):
         x = self.final_conv(x)
 
         return x
+
+    def fusion_diagnostics(self):
+        """最近一次前向的融合权重，baseline 返回 None"""
+        if not self.use_mr_frontend or self.mr_frontend.last_alpha is None:
+            return None
+        return {
+            "alpha": self.mr_frontend.last_alpha,   # (B, 3): short, mid, long
+            "fusion_scale": self.fusion_scale.detach(),
+        }

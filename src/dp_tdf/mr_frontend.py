@@ -4,6 +4,9 @@ import torch.nn.functional as F
 
 from src.layers import get_norm
 
+# baseline 不经过本模块，由 DPTDFNet 直接关闭前端
+FUSION_MODES = ("fixed", "learned_static", "dynamic", "mid_only")
+
 
 class ConvBNAct(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, bn_norm, bias=False):
@@ -37,9 +40,9 @@ class MRBranch(nn.Module):
 
 class WeightNet(nn.Module):
     """
-    三路动态权重生成模块
+    输入相关的片段级动态权重
     输入：三路特征
-    输出：alpha_short, alpha_mid, alpha_long
+    输出：(B, 3)，依次为 short / mid / long
     """
     def __init__(self, channels, hidden_dim=128):
         super().__init__()
@@ -48,92 +51,139 @@ class WeightNet(nn.Module):
 
     def forward(self, f_s, f_m, f_l):
         # GAP: (B, C, F, T) -> (B, C)
-        z_s = f_s.mean(dim=(-1, -2))
-        z_m = f_m.mean(dim=(-1, -2))
-        z_l = f_l.mean(dim=(-1, -2))
-
-        z = torch.cat([z_s, z_m, z_l], dim=1)   # (B, 3C)
+        z = torch.cat([f.mean(dim=(-1, -2)) for f in (f_s, f_m, f_l)], dim=1)   # (B, 3C)
         z = F.relu(self.fc1(z))
-        alpha = torch.softmax(self.fc2(z), dim=1)  # (B, 3)
+        return torch.softmax(self.fc2(z), dim=1)
 
-        a_s = alpha[:, 0].view(-1, 1, 1, 1)
-        a_m = alpha[:, 1].view(-1, 1, 1, 1)
-        a_l = alpha[:, 2].view(-1, 1, 1, 1)
-        return a_s, a_m, a_l
+
+class FreqResampler(nn.Module):
+    """
+    按物理频率把 n_fft_src 的频谱重采样到中窗前 dim_f 个 bin
+    中窗第 k 个 bin 的频率 = k * sr / n_fft_mid，
+    在源谱中的位置 p_k = k * n_fft_src / n_fft_mid（一般不是整数），做线性插值
+    """
+    def __init__(self, n_fft_src, n_fft_mid, dim_f):
+        super().__init__()
+        pos = torch.arange(dim_f, dtype=torch.float64) * n_fft_src / n_fft_mid
+        idx0 = pos.floor().long()
+        w = (pos - idx0).float()
+
+        # 线性插值需要 idx0 + 1，因此保留到 idx0[-1] + 1
+        self.num_src_bins = int(idx0[-1].item()) + 2
+        assert self.num_src_bins <= n_fft_src // 2 + 1, "中窗 f_max 超出源谱的奈奎斯特频率"
+
+        self.n_fft_src = n_fft_src
+        self.n_fft_mid = n_fft_mid
+        self.dim_f = dim_f
+        self.register_buffer("idx0", idx0, persistent=False)
+        self.register_buffer("w", w.view(1, 1, -1, 1), persistent=False)
+
+    def crop(self, x):
+        # (B, C, F_src, T) -> (B, C, num_src_bins, T)，先去掉 f_max 以上的频点
+        return x[:, :, :self.num_src_bins]
+
+    def forward(self, x):
+        # (B, C, num_src_bins, T) -> (B, C, dim_f, T)
+        assert x.shape[2] == self.num_src_bins
+        x0 = x.index_select(2, self.idx0)
+        x1 = x.index_select(2, self.idx0 + 1)
+        w = self.w.to(x.dtype)
+        return x0 * (1 - w) + x1 * w
 
 
 class MRFrontend(nn.Module):
     """
     多分辨率前端
-    说明：
-    - 中窗路不再单独做stem，直接使用DTT原始first_conv之后的特征f_base
-    - 长窗、短窗各自做1x1stem
-    - 然后统一对齐到中窗域
+    - 中窗路直接使用 DTT 原始 first_conv 之后的特征 f_base
+    - 短窗、长窗先裁到中窗最高频率，各自做 1x1 stem，再按物理频率对齐到中窗频点
     - 三路浅层卷积分支
-    - 动态权重融合
+    - 按 fusion_mode 融合：
+        fixed          固定 (1/3, 1/3, 1/3)
+        learned_static 输入无关的可学习全局权重
+        dynamic        输入相关的片段级动态权重（DRFF）
+        mid_only       容量对照：三路分支都输入中窗特征，固定 1/3 权重
     """
     def __init__(
         self,
         dim_c_in,
         g,
         bn_norm,
+        dim_f,
+        n_fft_mid,
+        n_fft_short,
+        n_fft_long,
+        fusion_mode="dynamic",
         num_branch_layers=2,
         weight_hidden_dim=128,
         bias=False,
-        align_mode="bilinear",
     ):
         super().__init__()
+        assert fusion_mode in FUSION_MODES, f"未知 fusion_mode: {fusion_mode}"
+        self.fusion_mode = fusion_mode
 
-        self.align_mode = align_mode
-
-        # 只有 long / short 需要额外 stem
-        self.stem_short = nn.Sequential(
-            nn.Conv2d(dim_c_in, g, kernel_size=1, bias=bias),
-            get_norm(bn_norm, g),
-            nn.ReLU()
-        )
-
-        self.stem_long = nn.Sequential(
-            nn.Conv2d(dim_c_in, g, kernel_size=1, bias=bias),
-            get_norm(bn_norm, g),
-            nn.ReLU()
-        )
+        if fusion_mode != "mid_only":
+            self.resample_short = FreqResampler(n_fft_short, n_fft_mid, dim_f)
+            self.resample_long = FreqResampler(n_fft_long, n_fft_mid, dim_f)
+            self.stem_short = self._stem(dim_c_in, g, bn_norm, bias)
+            self.stem_long = self._stem(dim_c_in, g, bn_norm, bias)
 
         # 三路浅层卷积分支：结构相同，参数独立
         self.branch_short = MRBranch(g, bn_norm, num_layers=num_branch_layers, bias=bias)
         self.branch_mid = MRBranch(g, bn_norm, num_layers=num_branch_layers, bias=bias)
         self.branch_long = MRBranch(g, bn_norm, num_layers=num_branch_layers, bias=bias)
 
-        self.weight_net = WeightNet(g, hidden_dim=weight_hidden_dim)
+        if fusion_mode == "dynamic":
+            self.weight_net = WeightNet(g, hidden_dim=weight_hidden_dim)
+        elif fusion_mode == "learned_static":
+            # 全零 logits，softmax 后初始权重为 (1/3, 1/3, 1/3)
+            self.static_logits = nn.Parameter(torch.zeros(3))
+        else:
+            self.register_buffer("fixed_alpha", torch.full((3,), 1.0 / 3), persistent=False)
 
-    def _align_to_mid(self, x, target_hw):
-        # x: (B, C, F, T)
-        # target_hw: (F_mid, T_mid)
-        return F.interpolate(x, size=target_hw, mode=self.align_mode, align_corners=False)
+        # 最近一次前向的融合权重 (B, 3)，仅用于日志和评估
+        self.last_alpha = None
+
+    @staticmethod
+    def _stem(dim_c_in, g, bn_norm, bias):
+        return nn.Sequential(
+            nn.Conv2d(dim_c_in, g, kernel_size=1, bias=bias),
+            get_norm(bn_norm, g),
+            nn.ReLU()
+        )
+
+    def _alpha(self, f_s, f_m, f_l):
+        b = f_m.shape[0]
+        if self.fusion_mode == "dynamic":
+            return self.weight_net(f_s, f_m, f_l)
+        if self.fusion_mode == "learned_static":
+            return torch.softmax(self.static_logits, dim=0).expand(b, 3)
+        return self.fixed_alpha.expand(b, 3)
 
     def forward(self, x_short, f_mid_base, x_long):
         """
         参数：
-        x_short: 短窗原始谱图，shape=(B, dim_c_in, F_s, T_s)
-        f_mid_base: 中窗 first_conv 后特征，shape=(B, g, F_m, T_m)
-        x_long: 长窗原始谱图，shape=(B, dim_c_in, F_l, T_l)
+        x_short: 短窗原始谱图，shape=(B, dim_c_in, F_s, T)，未裁剪
+        f_mid_base: 中窗 first_conv 后特征，shape=(B, g, dim_f, T)
+        x_long: 长窗原始谱图，shape=(B, dim_c_in, F_l, T)，未裁剪
 
         返回：
-        F_fused: shape=(B, g, F_m, T_m)
+        f_fused: shape=(B, g, dim_f, T)
         """
-        target_hw = f_mid_base.shape[-2:]  # (F_m, T_m)
-
-        f_s0 = self.stem_short(x_short)
-        f_l0 = self.stem_long(x_long)
-
-        f_s0 = self._align_to_mid(f_s0, target_hw)
-        f_l0 = self._align_to_mid(f_l0, target_hw)
+        if self.fusion_mode == "mid_only":
+            f_s0 = f_l0 = f_mid_base
+        else:
+            # 同一 hop_length 且 center=True 时三路帧数必然一致
+            assert x_short.shape[-1] == f_mid_base.shape[-1] == x_long.shape[-1], \
+                "三路 STFT 时间帧数不一致，检查 hop_length 和 center"
+            f_s0 = self.resample_short(self.stem_short(self.resample_short.crop(x_short)))
+            f_l0 = self.resample_long(self.stem_long(self.resample_long.crop(x_long)))
 
         f_s = self.branch_short(f_s0)
         f_m = self.branch_mid(f_mid_base)
         f_l = self.branch_long(f_l0)
 
-        a_s, a_m, a_l = self.weight_net(f_s, f_m, f_l)
+        alpha = self._alpha(f_s, f_m, f_l)
+        self.last_alpha = alpha.detach()
 
-        f_fused = a_s * f_s + a_m * f_m + a_l * f_l
-        return f_fused
+        a = alpha.to(f_m.dtype).view(-1, 3, 1, 1, 1)
+        return a[:, 0] * f_s + a[:, 1] * f_m + a[:, 2] * f_l

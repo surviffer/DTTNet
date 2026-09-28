@@ -1,7 +1,7 @@
 import dotenv
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from src.utils.omega_resolvers import get_train_log_dir, get_sweep_log_dir
+from src.utils.omega_resolvers import get_train_log_dir, get_sweep_log_dir, fusion_tag, mul
 # load environment variables from `.env` file if it exists
 # recursively searches for `.env` in all folders starting from work dir
 from pytorch_lightning.utilities import rank_zero_info
@@ -41,4 +41,6 @@ if __name__ == "__main__":
     # register resolvers with hydra key run.dir
     OmegaConf.register_new_resolver("get_train_log_dir", get_train_log_dir)
     OmegaConf.register_new_resolver("get_sweep_log_dir", get_sweep_log_dir)
+    OmegaConf.register_new_resolver("fusion_tag", fusion_tag)
+    OmegaConf.register_new_resolver("mul", mul)
     main()

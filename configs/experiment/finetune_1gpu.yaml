@@ -1,0 +1,50 @@
+# @package _global_
+
+# 单卡微调：从官方预训练 DTTNet 加载主干，四种模式使用完全相同的设置
+# python train.py experiment=finetune_1gpu datamodule=musdb_dev14 model=drums \
+#   pretrained_ckpt=/path/to/drums.ckpt model.mr_frontend.fusion_mode=dynamic seed=2021
+# Baseline：model.mr_frontend.enabled=false
+
+defaults:
+  - override /callbacks: default
+  - override /logger:
+    - tensorboard
+
+seed: 2021
+pretrained_ckpt: ???       # 必填，官方预训练 checkpoint
+train_steps: 15000         # 优化器步数，所有模式共用，看测试结果前冻结
+val_every_steps: 2000      # 每多少个优化器步验证一次
+
+exp_name: ft_${model.target_name}_${fusion_tag:${model.mr_frontend.enabled},${model.mr_frontend.fusion_mode}}_s${seed}
+
+logger:
+  tensorboard:
+    name: ${exp_name}
+
+model:
+  lr: 0.0001
+  optimizer: adamW
+  bn_norm: BN
+  audio_ch: 2
+  g: 16
+  mr_frontend:
+    fusion_scale_init: 0.0   # 起点与预训练 baseline 完全一致
+
+trainer:
+  accelerator: cuda
+  devices: 1
+  precision: bf16            # 5090 支持 BF16，避免 FP16 跳连溢出
+  accumulate_grad_batches: 4 # batch 4 × 4 = 等效 batch 16，与原版 2 卡 × 8 一致
+  max_epochs: -1
+  max_steps: ${train_steps}
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 0
+
+datamodule:
+  batch_size: 4
+  num_workers: ${oc.decode:${oc.env:NUM_WORKERS}}
+  pin_memory: True
+  overlap: ${model.overlap}
+  audio_ch: ${model.audio_ch}
+  # 一个 epoch = val_every_steps 个优化器步，使验证按固定步数进行
+  epoch_size: ${mul:${val_every_steps},${datamodule.batch_size},${trainer.accumulate_grad_batches}}

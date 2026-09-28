@@ -1,7 +1,7 @@
 model_checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint
   monitor: "val/usdr" # name of the logged metric which determines when model is improving
-  save_top_k: 5 # save k best models (determined by above metric)
+  save_top_k: 1 # 只保留 val/usdr 最高的一个，不再用 pick_best.py 二次挑选
   save_last: True # additionaly always save model from last epoch
   mode: "max" # can be "max" or "min"
   verbose: True
@@ -25,7 +25,3 @@ model_checkpoint:
 #  patience: 300 # how many epochs of not improving until training stops
 #  mode: "max" # can be "max" or "min"
 #  min_delta: 0.05 # minimum change in the monitored metric needed to qualify as an improvement
-
-#make_onnx:
-#  _target_: src.callbacks.onnx_callback.MakeONNXCallback
-#  dirpath: "onnx/"

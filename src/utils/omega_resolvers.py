@@ -46,3 +46,16 @@ def get_sweep_log_dir(a, b, *, _parent_):
         return f"{dir_path}_{str(cur_suffix2)}"
     else:
         return f"{dir_path}_{str(cur_suffix2)}"
+
+
+def fusion_tag(enabled, fusion_mode):
+    # 用于实验命名：前端关闭时统一记为 baseline
+    return fusion_mode if str(enabled).lower() == "true" else "baseline"
+
+
+def mul(*args):
+    # 整数连乘，例如 epoch_size = 验证间隔步数 × batch_size × 梯度累积
+    out = 1
+    for a in args:
+        out *= int(a)
+    return out
