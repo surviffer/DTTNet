@@ -156,7 +156,11 @@ def train(cfg: DictConfig) -> Optional[float]:
 
     # Train the model
     log.info("Starting training!")
-    trainer.fit(model=model, datamodule=datamodule)
+    # resume_ckpt：断电或中断后从续训 checkpoint 恢复（模型、优化器、步数、最优 checkpoint 记录）
+    resume_ckpt = cfg.get("resume_ckpt")
+    if resume_ckpt:
+        log.info(f"Resuming from {resume_ckpt}")
+    trainer.fit(model=model, datamodule=datamodule, ckpt_path=resume_ckpt)
 
     # Evaluate model on test set after training
     # if not cfg.trainer.get("fast_dev_run"):

@@ -14,12 +14,26 @@ seed: 2021
 pretrained_ckpt: ???       # 必填，官方预训练 checkpoint
 train_steps: 15000         # 优化器步数，所有模式共用，看测试结果前冻结
 val_every_steps: 2000      # 每多少个优化器步验证一次
+resume_ckpt: null          # 续训 checkpoint，由 scripts/finetune_all.sh 自动填写
 
 exp_name: ft_${model.target_name}_${fusion_tag:${model.mr_frontend.enabled},${model.mr_frontend.fusion_mode}}_s${seed}
 
 logger:
   tensorboard:
     name: ${exp_name}
+
+callbacks:
+  # 续训 checkpoint：每 500 个优化器步覆盖保存一次，断电最多损失 500 步
+  resume_checkpoint:
+    _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    dirpath: "resume/"          # 与 checkpoints/ 分开，评估脚本不会误选
+    filename: "resume-{step}"
+    auto_insert_metric_name: False
+    monitor: null
+    save_top_k: 1
+    save_last: False
+    every_n_train_steps: 500
+    save_on_train_epoch_end: False
 
 model:
   lr: 0.0001
