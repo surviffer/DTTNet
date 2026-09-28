@@ -8,7 +8,7 @@ from src.utils.omega_resolvers import get_eval_log_dir
 from pathlib import Path
 
 import dotenv
-from src.evaluation.separate import separate_with_ckpt_TDF, no_overlap_inference, overlap_inference
+from src.evaluation.separate import separate_with_ckpt_TDF
 dotenv.load_dotenv(override=True)
 
 
@@ -28,7 +28,7 @@ def main(config: DictConfig):
     ckpt_path = Path(config.ckpt_path)
     print(ckpt_path)
     mixture = load_wav(config.mixture_path)
-    target_hat = separate_with_ckpt_TDF(config.batch_size, model, ckpt_path, mixture, config.device,
+    target_hat, _ = separate_with_ckpt_TDF(config.batch_size, model, ckpt_path, mixture, config.device,
                                         config.double_chunk, config.overlap_add)
 
 
