@@ -18,8 +18,11 @@ if [ -f .env ]; then set -a; source .env; set +a; fi
 OVERLAP_ADD=${OVERLAP_ADD:-off}
 SPLIT=${SPLIT:-test}
 POOL_WORKERS=${POOL_WORKERS:-8}
+# 主干尺寸必须与训练时一致；finetune_1gpu 使用官方尺寸（g=32、4 层 LSTM）
+BACKBONE_ARGS=${BACKBONE_ARGS:-"model.g=32 model.bandsequence.num_layers=4"}
 
 overlap_arg=""
+missing=()
 [ "$OVERLAP_ADD" = "off" ] && overlap_arg="overlap_add=null"
 
 for run_dir in "$LOG_DIR"/ft_*_s*; do
@@ -37,7 +40,11 @@ for run_dir in "$LOG_DIR"/ft_*_s*; do
 
   # 最优 checkpoint（save_top_k=1，排除 last.ckpt）
   best=$(ls "$run_dir"/checkpoints/*.ckpt 2>/dev/null | grep -v '/last.ckpt$' | head -n 1 || true)
-  [ -n "$best" ] || { echo "[warn] $exp 没有最优 checkpoint"; continue; }
+  if [ -z "$best" ]; then
+    echo "[warn] $exp 没有最优 checkpoint"
+    missing+=("$exp")
+    continue
+  fi
 
   if [ "$mode" = "baseline" ]; then
     margs="model.mr_frontend.enabled=false"
@@ -47,9 +54,15 @@ for run_dir in "$LOG_DIR"/ft_*_s*; do
 
   echo "[eval] $exp  $(basename "$best")"
   # shellcheck disable=SC2086
-  python run_eval.py model="$stem" $margs model.bn_norm=BN \
+  python run_eval.py model="$stem" $margs model.bn_norm=BN $BACKBONE_ARGS \
     ckpt_path="$best" split="$SPLIT" seed="$seed" pool_workers="$POOL_WORKERS" \
     logger=[] $overlap_arg hydra.run.dir="$out_dir"
 done
+
+# 缺少任何一个实验时以非零状态退出，避免在不完整的结果上做配对比较
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "以下实验没有可评估的 checkpoint，请先补跑：${missing[*]}"
+  exit 1
+fi
 
 echo "评估完成，汇总：python scripts/summarize.py --eval_dir $LOG_DIR/eval_${SPLIT}"

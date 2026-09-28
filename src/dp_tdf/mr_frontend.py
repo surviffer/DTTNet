@@ -101,7 +101,8 @@ class MRFrontend(nn.Module):
         fixed          固定 (1/3, 1/3, 1/3)
         learned_static 输入无关的可学习全局权重
         dynamic        输入相关的片段级动态权重（DRFF）
-        mid_only       容量对照：三路分支都输入中窗特征，固定 1/3 权重
+        mid_only       等容量对照：结构和参数量与 fixed 完全相同，
+                       但 short/long 两路的 stem 输入换成中窗谱，固定 1/3 权重
     """
     def __init__(
         self,
@@ -121,11 +122,13 @@ class MRFrontend(nn.Module):
         assert fusion_mode in FUSION_MODES, f"未知 fusion_mode: {fusion_mode}"
         self.fusion_mode = fusion_mode
 
+        # 所有模式都创建两路 stem，保证 mid_only 与 fixed 的可训练结构完全相同
+        self.stem_short = self._stem(dim_c_in, g, bn_norm, bias)
+        self.stem_long = self._stem(dim_c_in, g, bn_norm, bias)
         if fusion_mode != "mid_only":
+            # FreqResampler 只有不可训练的 buffer，不影响参数量
             self.resample_short = FreqResampler(n_fft_short, n_fft_mid, dim_f)
             self.resample_long = FreqResampler(n_fft_long, n_fft_mid, dim_f)
-            self.stem_short = self._stem(dim_c_in, g, bn_norm, bias)
-            self.stem_long = self._stem(dim_c_in, g, bn_norm, bias)
 
         # 三路浅层卷积分支：结构相同，参数独立
         self.branch_short = MRBranch(g, bn_norm, num_layers=num_branch_layers, bias=bias)
@@ -159,18 +162,22 @@ class MRFrontend(nn.Module):
             return torch.softmax(self.static_logits, dim=0).expand(b, 3)
         return self.fixed_alpha.expand(b, 3)
 
-    def forward(self, x_short, f_mid_base, x_long):
+    def forward(self, x_short, f_mid_base, x_long, x_mid=None):
         """
         参数：
-        x_short: 短窗原始谱图，shape=(B, dim_c_in, F_s, T)，未裁剪
+        x_short: 短窗原始谱图，shape=(B, dim_c_in, F_s, T)，未裁剪；mid_only 时为 None
         f_mid_base: 中窗 first_conv 后特征，shape=(B, g, dim_f, T)
-        x_long: 长窗原始谱图，shape=(B, dim_c_in, F_l, T)，未裁剪
+        x_long: 长窗原始谱图，shape=(B, dim_c_in, F_l, T)，未裁剪；mid_only 时为 None
+        x_mid: 中窗原始谱图，shape=(B, dim_c_in, dim_f, T)，仅 mid_only 使用
 
         返回：
         f_fused: shape=(B, g, dim_f, T)
         """
         if self.fusion_mode == "mid_only":
-            f_s0 = f_l0 = f_mid_base
+            # 与 fixed 走同样的 stem -> 分支，只是输入换成中窗谱（无需频率对齐）
+            assert x_mid is not None, "mid_only 需要中窗原始谱 x_mid"
+            f_s0 = self.stem_short(x_mid)
+            f_l0 = self.stem_long(x_mid)
         else:
             # 同一 hop_length 且 center=True 时三路帧数必然一致
             assert x_short.shape[-1] == f_mid_base.shape[-1] == x_long.shape[-1], \

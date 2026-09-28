@@ -31,6 +31,17 @@ _NEW_PARAM_PREFIXES = ("mr_frontend.", "fusion_scale", "window_mid", "window_sho
 def load_pretrained_backbone(model: LightningModule, ckpt_path: str) -> None:
     state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state = state.get("state_dict", state)
+    # strict=False 只放行缺失的新参数；同名张量尺寸不同时单独给出提示
+    own = model.state_dict()
+    shape_mismatch = [
+        f"{k}: ckpt {tuple(v.shape)} vs model {tuple(own[k].shape)}"
+        for k, v in state.items() if k in own and own[k].shape != v.shape
+    ]
+    if shape_mismatch:
+        raise RuntimeError(
+            "预训练权重与当前主干尺寸不一致（检查 model.g 和 model.bandsequence.num_layers）\n"
+            + "\n".join(shape_mismatch[:10])
+        )
     missing, unexpected = model.load_state_dict(state, strict=False)
     bad_missing = [k for k in missing if not k.startswith(_NEW_PARAM_PREFIXES)]
     if bad_missing or unexpected:

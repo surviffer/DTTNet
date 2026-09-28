@@ -86,7 +86,14 @@ def test_alpha_properties(mode):
         assert not torch.allclose(a1, a2)                           # 随输入变化
 
 
-@pytest.mark.parametrize("mode", ["fixed", "learned_static", "dynamic"])
+def test_mid_only_has_same_trainable_structure_as_fixed():
+    # mid_only 是等容量对照：可训练参数的名称和形状必须与 fixed 完全一致
+    def shapes(m):
+        return {k: tuple(p.shape) for k, p in m.named_parameters() if p.requires_grad}
+    assert shapes(build("mid_only")) == shapes(build("fixed"))
+
+
+@pytest.mark.parametrize("mode", ["fixed", "learned_static", "dynamic", "mid_only"])
 def test_all_branches_receive_grad(mode):
     torch.manual_seed(0)
     m = build(mode).train()

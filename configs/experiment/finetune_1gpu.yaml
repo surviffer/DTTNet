@@ -26,7 +26,11 @@ model:
   optimizer: adamW
   bn_norm: BN
   audio_ch: 2
-  g: 16
+  # 主干尺寸必须与官方预训练权重一致（原版 g=32、4 层 LSTM），
+  # 本分支 configs/model/*.yaml 默认是 mini 版（g=16、2 层），不能直接加载官方权重
+  g: 32
+  bandsequence:
+    num_layers: 4
   mr_frontend:
     fusion_scale_init: 0.0   # 起点与预训练 baseline 完全一致
 

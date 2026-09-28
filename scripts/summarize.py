@@ -5,7 +5,9 @@
     python scripts/summarize.py --eval_dir $LOG_DIR/eval_test [--out_dir results]
 
 统计规则（在看测试结果前已固定）：
-- 每首曲目先在各种子上取平均，再在曲目层面做配对比较，避免把种子当作独立样本
+- 先校验完整性：同一音源下每个 (模型, 种子) 必须覆盖相同的曲目集合，否则报错
+- 每个比较只使用 A、B 两侧共有的种子；每首曲目先在这些种子上取平均，
+  再在曲目层面做配对比较，避免把种子当作独立样本
 - 95% 置信区间：配对差均值的 bootstrap（10000 次，按曲目重采样）
 - 显著性：Wilcoxon 符号秩检验；同一文件内的全部比较一起做 Holm 校正
 - 效应量：配对差中位数（dB）与 matched-pairs rank-biserial
@@ -75,6 +77,23 @@ def main():
     if tracks.empty:
         raise SystemExit(f"{args.eval_dir} 下没有 per_track.csv")
 
+    # 0. 完整性校验：同一音源下所有 (模型, 种子) 的曲目集合必须一致
+    dup = tracks.duplicated(["stem", "model", "seed", "track"])
+    if dup.any():
+        raise SystemExit(f"存在重复的评估结果：\n{tracks[dup].head()}")
+    for stem, df in tracks.groupby("stem"):
+        sets = df.groupby(["model", "seed"])["track"].apply(frozenset)
+        ref = max(sets, key=len)
+        bad = sets[sets != ref]
+        if len(bad):
+            raise SystemExit(
+                f"[{stem}] 以下实验的曲目集合不完整，先补齐评估再汇总：\n"
+                + "\n".join(f"  {m} seed={s}: {len(v)}/{len(ref)} 首" for (m, s), v in bad.items())
+            )
+    seeds_table = tracks.groupby(["stem", "model"])["seed"].apply(lambda s: sorted(set(s)))
+    print("== 各实验的种子 ==")
+    print(seeds_table.to_string())
+
     # 1. 每个模型 × 音源：种子间均值与标准差（先对曲目取平均）
     per_seed = tracks.groupby(["stem", "model", "seed"])["uSDR"].mean().reset_index()
     summary = per_seed.groupby(["stem", "model"])["uSDR"].agg(["mean", "std", "count"])
@@ -83,21 +102,27 @@ def main():
     print("\n== uSDR（曲目平均后，按种子统计）==")
     print(summary.to_string())
 
-    # 2. 每首曲目在种子上取平均，用于配对比较
-    per_track = tracks.groupby(["stem", "model", "track"])["uSDR"].mean().unstack("model")
-
+    # 2. 配对比较：只用 A、B 共有的种子，每首曲目先在这些种子上取平均
     rows = []
-    for stem, df in per_track.groupby(level="stem"):
+    for stem, df in tracks.groupby("stem"):
         for a, b, question in COMPARISONS:
-            if a not in df or b not in df:
+            seeds_a = set(df.loc[df.model == a, "seed"])
+            seeds_b = set(df.loc[df.model == b, "seed"])
+            common = sorted(seeds_a & seeds_b)
+            if not common:
                 continue
-            d = (df[a] - df[b]).dropna().to_numpy()
-            if len(d) == 0:
-                continue
+            if seeds_a != seeds_b:
+                print(f"[warn] {stem} {a} - {b}: 种子不一致，只使用共有种子 {common}"
+                      f"（{a}: {sorted(seeds_a)}，{b}: {sorted(seeds_b)}）")
+            sub = df[df.seed.isin(common) & df.model.isin([a, b])]
+            per_track = sub.groupby(["model", "track"])["uSDR"].mean().unstack("model")
+            d = (per_track[a] - per_track[b]).to_numpy()
+            assert not np.isnan(d).any(), "曲目集合不一致"
             lo, hi = bootstrap_ci(d)
             p = wilcoxon(d).pvalue if wilcoxon is not None and np.any(d != 0) else np.nan
             rows.append({
                 "stem": stem, "comparison": f"{a} - {b}", "question": question,
+                "seeds": " ".join(map(str, common)),
                 "n_tracks": len(d), "mean_diff": d.mean(), "median_diff": np.median(d),
                 "ci95_low": lo, "ci95_high": hi, "p_wilcoxon": p,
                 "rank_biserial": rank_biserial(d),

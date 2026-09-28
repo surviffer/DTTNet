@@ -124,7 +124,7 @@ class DPTDFNet(AbstractModel):
         # 中窗主路：复用原始first_conv
         f_base = self.first_conv(x["mid"])
         if self.use_mr_frontend:
-            f_fused = self.mr_frontend(x["short"], f_base, x["long"])
+            f_fused = self.mr_frontend(x["short"], f_base, x["long"], x_mid=x["mid"])
             x = f_base + self.fusion_scale * f_fused
         else:
             x = f_base
