@@ -29,7 +29,7 @@ _NEW_PARAM_PREFIXES = ("mr_frontend.", "fusion_scale", "window_mid", "window_sho
 
 
 def load_pretrained_backbone(model: LightningModule, ckpt_path: str) -> None:
-    state = torch.load(ckpt_path, map_location="cpu")
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state = state.get("state_dict", state)
     missing, unexpected = model.load_state_dict(state, strict=False)
     bad_missing = [k for k in missing if not k.startswith(_NEW_PARAM_PREFIXES)]

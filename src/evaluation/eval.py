@@ -58,7 +58,7 @@ def evaluation(config: DictConfig):
     target_list = [config.model.target_name,"complement"]
 
     # 逐曲目结果：model, seed, checkpoint, track, stem, uSDR
-    meta = torch.load(ckpt_path, map_location="cpu").get("drff_meta", {})
+    meta = torch.load(ckpt_path, map_location="cpu", weights_only=False).get("drff_meta", {})
     run_model = meta.get("fusion_mode", getattr(model, "fusion_mode", "baseline"))
     run_seed = config.get("seed") if config.get("seed") is not None else meta.get("seed")
     track_rows = []

@@ -41,7 +41,7 @@ def separate_with_ckpt_TDF(batch_size, model, ckpt_path: Path, mix, device, doub
         target_wav_hat: (c, t)
         alphas: 每个片段的 [alpha_short, alpha_mid, alpha_long, fusion_scale]，baseline 为空列表
     '''
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     check_checkpoint_meta(model, checkpoint)
     model.load_state_dict(checkpoint["state_dict"])
 

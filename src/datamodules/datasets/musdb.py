@@ -84,7 +84,7 @@ class MusdbTrainDataset(MusdbDataset):
 		raw_track_lengths = []   # for calculating epoch size
 		for i, (dataset, metadata_cache) in enumerate(tqdm(zip(datasets, metadata_caches))):
 			try:
-				metadata = torch.load(metadata_cache)
+				metadata = torch.load(metadata_cache, weights_only=False)
 			except FileNotFoundError:
 				print('creating metadata for', dataset)
 				metadata = []
